@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.0 · 2026-09-17
+
+- Add a Feishu-style article outline: headings dock to the left of the reading pane, jump on click and highlight the current section while scrolling. Toggle it from the reader toolbar or Reading settings.
+- Show the outline for every reading mode (rewrite, translation, original and vault Markdown); paragraph-only articles without headings keep the full width.
+
 ## 0.18.2 — 2026-09-07
 
 - Use a calm sage article selection palette with separate dark-mode and hover states; preserve row density and remove the tinted inset frame.

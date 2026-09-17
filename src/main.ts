@@ -272,6 +272,11 @@ export default class QiaomuRssPlugin extends Plugin {
       if (leaf.view instanceof ReaderView) leaf.view.reset();
     }
   }
+  rerenderReaders() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view instanceof ReaderView) leaf.view.refreshReader();
+    }
+  }
 }
 class RssSettings extends PluginSettingTab {
   private section = '阅读';
@@ -301,6 +306,9 @@ class RssSettings extends PluginSettingTab {
           for (const width of [28, 36, 44]) drop.addOption(String(width), width + ' 字');
           drop.setValue(String(settings.lineWidth)).onChange(async value => { settings.lineWidth = Number(value) as 28 | 36 | 44; await saveReading(); });
         }); } },
+        { name: '显示文章大纲', desc: '在正文左侧显示标题大纲，点击可快速定位；阅读时自动高亮当前位置。', render: setting => {
+          setting.addToggle(toggle => toggle.setValue(settings.outline).onChange(async value => { settings.outline = value; this.plugin.rerenderReaders(); await this.plugin.persist(); }));
+        } },
       ] },
       { type: 'group', heading: '库内 Markdown 来源', items: [
         { name: '阅读文件夹', desc: '包含子文件夹。可选择剪藏目录或其他 Markdown 文件夹；通过频道菜单进入。', render: setting => {
