@@ -7,6 +7,7 @@ import { enableImageDrag, prepareMarkdownImageDrags } from './image-drag';
 import { SelectionCapture } from './selection';
 import { readingFonts, selectableFonts, fontFamily } from './fonts';
 import { articleFragment } from './content';
+import { extractOutline } from './outline';
 import { modeLabels, modeSchema, readingFontSchema, safeUrl, titleOf, type ChannelState, type Bundle, type Entry, type Mode } from './model';
 export const VIEW_TYPE = 'qiaomu-ai-rss-reader';
 type Filter = 'all' | 'unread' | 'favorites';
@@ -51,6 +52,9 @@ export class ReaderView extends ItemView {
   }
   private markdownComponent?: Component;
   private selectionCapture?: SelectionCapture;
+  private outlineObserver?: IntersectionObserver;
+  private outlineNav?: HTMLElement;
+  private outlineButtons = new Map<string, HTMLButtonElement>();
   private list!: HTMLElement;
   private reader!: HTMLElement;
   private status!: HTMLElement;
@@ -143,7 +147,7 @@ export class ReaderView extends ItemView {
     return Promise.resolve();
   }
   onClose(): Promise<void> {
-    this.saveChannel(); this.channelPicker?.close(false); this.stopRestoring();
+    this.saveChannel(); this.channelPicker?.close(false); this.stopRestoring(); this.clearOutline();
     if (this.checkpointTimer) window.clearTimeout(this.checkpointTimer);
     this.selectionCapture?.dispose();
     this.closed = true; this.listVersion++; this.articleVersion++; this.clearImages(); this.clearThumbnails(); this.contentEl.onkeydown = null;
@@ -526,7 +530,7 @@ export class ReaderView extends ItemView {
     }
   }
   private renderReader(keepContent = false) {
-    this.selectionCapture?.clear();
+    this.selectionCapture?.clear(); this.clearOutline();
     const active = this.contentEl.ownerDocument.activeElement;
     const restoreFocus = active !== this.reader && this.reader.contains(active);
     const scroll = this.reader.scrollTop;
@@ -561,6 +565,16 @@ export class ReaderView extends ItemView {
     }
     const toolbar = this.reader.createDiv('qrs-reader-toolbar');
     this.addIconButton(toolbar, this.focused ? 'panel-left-open' : 'panel-left-close', '显示或收起文章列表 [', () => this.toggleFocus());
+    const outlineToggle = this.addIconButton(toolbar, 'list', '显示或收起文章大纲', () => {
+      this.plugin.state.settings.outline = !this.plugin.state.settings.outline;
+      outlineToggle.setAttribute('aria-pressed', String(this.plugin.state.settings.outline));
+      outlineToggle.toggleClass('is-active', this.plugin.state.settings.outline);
+      this.run(() => this.plugin.persist());
+      this.renderReader(true);
+    });
+    outlineToggle.addClass('qrs-outline-toggle');
+    outlineToggle.setAttribute('aria-pressed', String(this.plugin.state.settings.outline));
+    outlineToggle.toggleClass('is-active', this.plugin.state.settings.outline);
     const modeId = `${this.appearanceId}-mode`; toolbar.createEl('label', { cls: 'qrs-visually-hidden', text: '阅读版本', attr: { for: modeId } });
     const select = toolbar.createEl('select', { cls: 'qrs-mode-select', attr: { id: modeId, 'data-qrs-field': '阅读版本' } });
     for (const [mode, label] of Object.entries(modeLabels).filter(([mode]) => (bundle.entry.origin !== 'local' && bundle.entry.origin !== 'vault') || mode === 'original')) select.createEl('option', { value: mode, text: label });
@@ -597,8 +611,13 @@ export class ReaderView extends ItemView {
       const rect = more.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom });
     });
     if (this.appearanceOpen) this.renderAppearanceSettings(toolbar);
-    if (previous) { this.reader.append(previous); this.reader.scrollTop = scroll; this.restoreOffsets(); return; }
-    const article = this.reader.createEl('article', { cls: 'qrs-article' });
+    if (previous) {
+      const restored = this.reader.createDiv('qrs-reading-body');
+      restored.append(previous); this.buildOutline(restored);
+      this.reader.scrollTop = scroll; this.restoreOffsets(); return;
+    }
+    const body = this.reader.createDiv('qrs-reading-body');
+    const article = body.createEl('article', { cls: 'qrs-article' });
     article.createEl('h1', { text: titleOf(bundle.entry) });
     if (this.message) article.createDiv({ cls: 'qrs-feedback', text: this.message, attr: { role: 'status' } });
     try {
@@ -606,7 +625,13 @@ export class ReaderView extends ItemView {
         const prose = article.createDiv('qrs-prose');
         this.markdownComponent = new Component(); this.markdownComponent.load();
         void MarkdownRenderer.render(this.app, bundle.entry.markdown, prose, bundle.entry.markdownPath || '', this.markdownComponent)
-          .then(() => prepareMarkdownImageDrags(this.app, this.plugin.images, prose, bundle.entry.markdownPath || ''))
+          .then(() => {
+            void prepareMarkdownImageDrags(this.app, this.plugin.images, prose, bundle.entry.markdownPath || '');
+            if (!this.closed && article.isConnected) {
+              const current = this.reader.querySelector(':scope > .qrs-reading-body');
+              if (current instanceof this.contentEl.ownerDocument.defaultView!.HTMLElement) this.buildOutline(current);
+            }
+          })
           .catch(() => { prose.setText('Markdown 无法显示，请打开源文件。'); });
       } else {
       const fragment = articleFragment(bundle, this.mode, article.ownerDocument, this.plugin.state.settings.remoteImages);
@@ -614,7 +639,55 @@ export class ReaderView extends ItemView {
       else article.createDiv({ cls: 'qrs-empty', text: this.articleLoading ? '正在获取正文…' : `${modeLabels[this.mode]}暂无正文。可以切换版本，或从“更多”中打开原文。` });
       }
     } catch { article.createDiv({ cls: 'qrs-empty', text: '正文无法显示，请打开原文阅读。' }); }
+    this.buildOutline(body);
     this.reader.scrollTop = scroll; this.restoreOffsets();
+  }
+  refreshReader() { this.renderReader(true); }
+  private clearOutline() {
+    this.outlineObserver?.disconnect(); this.outlineObserver = undefined;
+    this.outlineNav = undefined; this.outlineButtons.clear();
+  }
+  private buildOutline(body: HTMLElement) {
+    this.clearOutline();
+    if (!this.plugin.state.settings.outline) return;
+    const prose = body.querySelector('.qrs-prose');
+    if (!prose) return;
+    const items = extractOutline(prose);
+    if (!items.length) return;
+    const nav = body.createEl('nav', { cls: 'qrs-outline', attr: { 'aria-label': '文章大纲' } });
+    body.prepend(nav); this.outlineNav = nav;
+    for (const item of items) {
+      const button = nav.createEl('button', { cls: 'qrs-outline-item', text: item.text, attr: { title: item.text } });
+      button.style.paddingLeft = `${12 + item.depth * 14}px`;
+      button.addEventListener('click', () => this.scrollToHeading(item.id));
+      this.outlineButtons.set(item.id, button);
+    }
+    this.setOutlineActive(items[0].id);
+    const visible = new Map<string, boolean>();
+    this.outlineObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) visible.set(entry.target.id, entry.isIntersecting);
+      const current = items.filter(item => visible.get(item.id)).at(-1);
+      if (current) this.setOutlineActive(current.id);
+    }, { root: this.reader, rootMargin: '-56px 0px -70% 0px', threshold: 0 });
+    for (const item of items) {
+      const heading = prose.querySelector(`#${CSS.escape(item.id)}`);
+      if (heading) this.outlineObserver.observe(heading);
+    }
+  }
+  private scrollToHeading(id: string) {
+    const heading = this.reader.querySelector(`#${CSS.escape(id)}`);
+    if (!(heading instanceof this.contentEl.ownerDocument.defaultView!.HTMLElement)) return;
+    const offset = heading.getBoundingClientRect().top - this.reader.getBoundingClientRect().top;
+    this.reader.scrollTo({ top: this.reader.scrollTop + offset - 56, behavior: 'smooth' });
+    this.setOutlineActive(id);
+  }
+  private setOutlineActive(id: string) {
+    for (const [key, button] of this.outlineButtons) button.toggleClass('is-active', key === id);
+    const nav = this.outlineNav, button = this.outlineButtons.get(id);
+    if (!nav || !button) return;
+    const navRect = nav.getBoundingClientRect(), rect = button.getBoundingClientRect();
+    if (rect.top < navRect.top) nav.scrollTop -= navRect.top - rect.top + 6;
+    else if (rect.bottom > navRect.bottom) nav.scrollTop += rect.bottom - navRect.bottom + 6;
   }
   private renderAppearanceSettings(anchor: HTMLElement) {
     const settings = this.plugin.state.settings;
