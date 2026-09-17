@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.2 · 2026-09-17
+
+- Let outline items wrap to show full heading text instead of truncating.
+
 ## 0.19.1 · 2026-09-17
 
 - Enlarge the article outline text and spacing for easier scanning.
